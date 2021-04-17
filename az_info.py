@@ -33,6 +33,11 @@ class AzInfo(dict):
         if raw:
             self._add_nested_ids(raw)
             self._add_values_from_nesting(raw)
+            if isinstance(raw, list):
+                logger.debug("Coercing raw to a dict (was a list)")
+                # force to a dict to call .update()
+                raw = {'resources': raw}
+
             self.update(raw)
 
     def _add_nested_ids(self, obj):
@@ -58,16 +63,23 @@ class AzInfo(dict):
         #  we created a placeholder/pointer.
         id_to_dicts = id_to_dicts or dict(self.id_to_dicts)
 
-        if 'id' in d:
-            d.update(id_to_dicts.pop(d['id'], {}))
+        if isinstance(d, list):
+            for i in d:
+                self._add_values_from_nesting(i, id_to_dicts)
 
-        for key, value in d.items():
-            if isinstance(value, list):
-                for idx, itm in enumerate(value):
-                    if isinstance(itm, dict):
-                        self._add_values_from_nesting(itm, id_to_dicts)
-            elif isinstance(value, dict):
-                self._add_values_from_nesting(value, id_to_dicts)
+        elif isinstance(d, dict):
+            if 'id' in d:
+                d.update(id_to_dicts.pop(d['id'], {}))
+
+            for key, value in d.items():
+                if isinstance(value, list):
+                    for idx, itm in enumerate(value):
+                        if isinstance(itm, dict):
+                            self._add_values_from_nesting(itm, id_to_dicts)
+                elif isinstance(value, dict):
+                    self._add_values_from_nesting(value, id_to_dicts)
+        else:
+            logger.warning(f"Item: {d} of type {type(d)} was passed but not handled.")
 
     def _get_from_id_raw(self, id:str) -> typing.Optional[dict]:
         if id in self.id_to_dicts:
@@ -78,12 +90,19 @@ class AzInfo(dict):
         logger.debug(f"Adding a future for id: {id} to cache")
         self.id_to_dicts[id] = DictFuture(id, self)
 
+        query = f"""az graph query -q "Resources | where id == '{id}'" -o json"""
+        if id.lower() == 'all':
+            # 'special case for ALL resources
+            query = f"""az graph query -q "Resources" -o json"""
+
         try:
-            ret_val = json.loads(subprocess.check_output(f"""az graph query -q "Resources | where id == '{id}'" -o json""", shell=True))[0]
+            ret_val = json.loads(subprocess.check_output(query, shell=True))
+
+            # if not getting all, grab first
+            if id.lower() != 'all':
+                ret_val = ret_val[0]
         except IndexError:
             ret_val = {}
-        else:
-            assert isinstance(ret_val, dict)
 
         logger.debug(f"Adding ret_val to cache for id: {id}")
         self.id_to_dicts[id] = ret_val
@@ -102,7 +121,7 @@ class DictFuture(dict):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Will give all available info about a resource, as json. You should call az login to login before using this.')
-    parser.add_argument('-i', '--id', type=str, help='The resource id to get info for', required=True)
+    parser.add_argument('-i', '--id', type=str, help='The resource id to get info for. The string all can be given to pull all resources from this account.', required=True)
     parser.add_argument('-d', '--debug', action='store_true', help='If True, print debug info')
     args = parser.parse_args()
 

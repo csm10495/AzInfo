@@ -10,6 +10,8 @@ import json
 import subprocess
 import typing
 
+from concurrent.futures import ThreadPoolExecutor
+
 logger = logging.getLogger(__file__)
 
 AzInfo = typing.TypeVar('AzInfo')
@@ -29,16 +31,31 @@ class AzInfo(dict):
         # Share this dict with other AzInfo objects!
         self.id_to_dicts = id_to_dicts or {}
 
-        raw = self._get_from_id_raw(self.id)
-        if raw:
-            self._add_nested_ids(raw)
-            self._add_values_from_nesting(raw)
-            if isinstance(raw, list):
-                logger.debug("Coercing raw to a dict (was a list)")
-                # force to a dict to call .update()
-                raw = {'resources': raw}
+        # multithreading?
+        self.id_to_future = {}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            self.pool = pool
 
-            self.update(raw)
+            raw = self._get_from_id_raw(self.id)
+            if raw:
+                self._add_nested_ids(raw)
+                self._add_nested_ids_from_futures()
+                self._add_values_from_nesting(raw)
+                if isinstance(raw, list):
+                    logger.debug("Coercing raw to a dict (was a list)")
+                    # force to a dict to call .update()
+                    raw = {'resources': raw}
+
+                self.update(raw)
+
+    def _add_nested_ids_from_futures(self):
+        while self.id_to_future:
+            for id, future in list(self.id_to_future.items()):
+                del self.id_to_future[id]
+
+                d = future.result()
+                self.id_to_dicts[id] = d
+                self._add_nested_ids(d)
 
     def _add_nested_ids(self, obj):
         ''' keep track of what we already expanded... that way we won't expand to an infinite cycle '''
@@ -48,10 +65,10 @@ class AzInfo(dict):
                 self._add_nested_ids(itm)
 
         elif isinstance(obj, dict):
-            if 'id' in obj and obj['id'] not in self.id_to_dicts:
-                id = obj['id']
-                self.id_to_dicts[id] = self._get_from_id_raw(id)
-                self._add_nested_ids(self.id_to_dicts[id])
+            if 'id' in obj and obj['id'] not in self.id_to_dicts and \
+                obj['id'] not in self.id_to_future:
+                    id = obj['id']
+                    self.id_to_future[id] = self.pool.submit(self._get_from_id_raw, id)
 
             for value in obj.values():
                 self._add_nested_ids(value)
